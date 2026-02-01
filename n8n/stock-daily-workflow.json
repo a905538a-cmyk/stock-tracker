@@ -1,0 +1,197 @@
+{
+  "name": "台股每日股價抓取",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 14,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "每日14:30觸發",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 要追蹤的股票清單\nconst stocks = [\n  { code: '00918', name: '大華優利高填息30' },\n  { code: '00929', name: '復華台灣科技優息' },\n  { code: '00922', name: '國泰台灣領袖50' },\n  { code: '1229', name: '聯華' },\n  { code: '2324', name: '仁寶' },\n  { code: '5880', name: '合庫金' }\n];\n\nreturn stocks.map(s => ({ json: s }));"
+      },
+      "id": "stock-list",
+      "name": "股票清單",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "loop",
+      "name": "逐檔處理",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 取得今天日期 (台灣時間)\nconst now = new Date();\nconst taiwanTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));\n\n// 如果是週六日，往回找到週五\nconst day = taiwanTime.getDay();\nif (day === 0) taiwanTime.setDate(taiwanTime.getDate() - 2);\nif (day === 6) taiwanTime.setDate(taiwanTime.getDate() - 1);\n\nconst dateStr = taiwanTime.toISOString().split('T')[0].replace(/-/g, '');\n\nreturn [{\n  json: {\n    ...items[0].json,\n    queryDate: dateStr\n  }\n}];"
+      },
+      "id": "prepare-date",
+      "name": "準備日期",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={{ $json.queryDate }}&stockNo={{ $json.code }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "fetch-twse",
+      "name": "抓取證交所資料",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = items[0].json;\nconst stockInfo = $('準備日期').first().json;\n\nif (input.stat !== 'OK' || !input.data || input.data.length === 0) {\n  return [{ json: { success: false, code: stockInfo.code, error: '無資料' } }];\n}\n\n// 取得最後一筆資料\nconst latest = input.data[input.data.length - 1];\n\n// 解析資料\nconst close = parseFloat(latest[6].replace(/,/g, ''));\nconst limitUp = Math.round(close * 1.1 * 100) / 100;\nconst limitDown = Math.round(close * 0.9 * 100) / 100;\n\n// 解析民國年日期轉西元\nconst dateParts = latest[0].split('/');\nconst year = parseInt(dateParts[0]) + 1911;\nconst tradeDate = `${year}-${dateParts[1]}-${dateParts[2]}`;\n\nreturn [{\n  json: {\n    success: true,\n    code: stockInfo.code,\n    name: stockInfo.name,\n    trade_date: tradeDate,\n    open_price: parseFloat(latest[3].replace(/,/g, '')),\n    high_price: parseFloat(latest[4].replace(/,/g, '')),\n    low_price: parseFloat(latest[5].replace(/,/g, '')),\n    close_price: close,\n    change_amount: latest[7],\n    volume: parseInt(latest[1].replace(/,/g, '')),\n    limit_up: limitUp,\n    limit_down: limitDown\n  }\n}];"
+      },
+      "id": "parse-data",
+      "name": "解析資料",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.success }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-success",
+      "name": "檢查成功",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO stock_daily (code, name, trade_date, open_price, high_price, low_price, close_price, change_amount, volume, limit_up, limit_down)\nVALUES (\n  '{{ $json.code }}',\n  '{{ $json.name }}',\n  '{{ $json.trade_date }}',\n  {{ $json.open_price }},\n  {{ $json.high_price }},\n  {{ $json.low_price }},\n  {{ $json.close_price }},\n  '{{ $json.change_amount }}',\n  {{ $json.volume }},\n  {{ $json.limit_up }},\n  {{ $json.limit_down }}\n)\nON CONFLICT (code, trade_date) DO UPDATE SET\n  open_price = EXCLUDED.open_price,\n  high_price = EXCLUDED.high_price,\n  low_price = EXCLUDED.low_price,\n  close_price = EXCLUDED.close_price,\n  change_amount = EXCLUDED.change_amount,\n  volume = EXCLUDED.volume,\n  limit_up = EXCLUDED.limit_up,\n  limit_down = EXCLUDED.limit_down;",
+        "options": {}
+      },
+      "id": "insert-db",
+      "name": "寫入資料庫",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1650, 200],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "values": {
+          "number": [
+            {
+              "name": "wait",
+              "value": 1
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wait",
+      "name": "等待1秒",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1850, 300],
+      "webhookId": "wait-1s"
+    },
+    {
+      "parameters": {},
+      "id": "no-op",
+      "name": "略過",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1650, 400]
+    }
+  ],
+  "connections": {
+    "每日14:30觸發": {
+      "main": [
+        [{ "node": "股票清單", "type": "main", "index": 0 }]
+      ]
+    },
+    "股票清單": {
+      "main": [
+        [{ "node": "逐檔處理", "type": "main", "index": 0 }]
+      ]
+    },
+    "逐檔處理": {
+      "main": [
+        [{ "node": "準備日期", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "準備日期": {
+      "main": [
+        [{ "node": "抓取證交所資料", "type": "main", "index": 0 }]
+      ]
+    },
+    "抓取證交所資料": {
+      "main": [
+        [{ "node": "解析資料", "type": "main", "index": 0 }]
+      ]
+    },
+    "解析資料": {
+      "main": [
+        [{ "node": "檢查成功", "type": "main", "index": 0 }]
+      ]
+    },
+    "檢查成功": {
+      "main": [
+        [{ "node": "寫入資料庫", "type": "main", "index": 0 }],
+        [{ "node": "略過", "type": "main", "index": 0 }]
+      ]
+    },
+    "寫入資料庫": {
+      "main": [
+        [{ "node": "等待1秒", "type": "main", "index": 0 }]
+      ]
+    },
+    "等待1秒": {
+      "main": [
+        [{ "node": "逐檔處理", "type": "main", "index": 0 }]
+      ]
+    },
+    "略過": {
+      "main": [
+        [{ "node": "等待1秒", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
