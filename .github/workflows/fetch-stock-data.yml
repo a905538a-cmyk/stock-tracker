@@ -1,0 +1,33 @@
+name: 每日股價更新
+
+on:
+  schedule:
+    # 台灣時間下午 2:30 (UTC 6:30) - 確保收盤後
+    - cron: '30 6 * * 1-5'
+  workflow_dispatch: # 允許手動觸發
+
+jobs:
+  fetch-stock-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install dependencies
+        run: npm install node-fetch
+        
+      - name: Fetch stock data
+        run: node scripts/fetch-stock-data.js
+        
+      - name: Commit and push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add -A
+          git diff --quiet && git diff --staged --quiet || (git commit -m "📈 更新股價資料 $(date +'%Y-%m-%d')" && git push)
